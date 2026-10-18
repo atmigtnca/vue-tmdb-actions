@@ -1,78 +1,125 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, onBeforeUnmount } from 'vue'
+import MovieCard from './components/MovieCard.vue'
+import { fetchMovies } from './api.js'
+import tmdbLogo from './assets/tmdb-logo.svg'
 
-const apiKey = ref('')
+const draftKey = ref('')
+const apiKey = ref('') // Memory only. No localStorage, environment variable or source-code key.
+const query = ref('')
+const activeQuery = ref('')
 const movies = ref([])
-const status = ref('TMDB API Key를 입력하고 Connect를 누르세요.')
+const page = ref(1)
+const totalPages = ref(0)
+const totalResults = ref(0)
 const loading = ref(false)
+const error = ref('')
+let controller
+let requestId = 0
 
-async function connect() {
-  const key = apiKey.value.trim()
-  if (!key) {
-    status.value = 'API Key를 입력하세요.'
-    return
-  }
+async function loadMovies(nextPage = 1, term = activeQuery.value) {
+  const id = ++requestId
+  controller?.abort()
+  const currentController = new AbortController()
+  controller = currentController
+  let timedOut = false
+  const timer = setTimeout(() => { timedOut = true; currentController.abort() }, 15000)
   loading.value = true
-  status.value = '불러오는 중...'
+  error.value = ''
+  movies.value = []
   try {
-    // v3 API key는 query로, v4 Read Access Token(긴 JWT)은 Bearer 헤더로 보낸다.
-    const isBearer = key.length > 60
-    const url = 'https://api.themoviedb.org/3/movie/popular?language=ko-KR&page=1' + (isBearer ? '' : `&api_key=${encodeURIComponent(key)}`)
-    const res = await fetch(url, isBearer ? { headers: { Authorization: `Bearer ${key}` } } : undefined)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json()
-    movies.value = data.results || []
-    status.value = `인기 영화 ${movies.value.length}편`
-  } catch (e) {
-    movies.value = []
-    status.value = `불러오지 못했습니다 (${e.message}). API Key를 확인하세요.`
+    const data = await fetchMovies({ apiKey: apiKey.value, query: term,
+      page: nextPage, signal: currentController.signal })
+    if (id !== requestId) return
+    movies.value = data.results
+    page.value = data.page
+    totalPages.value = Math.min(data.total_pages, 500)
+    totalResults.value = data.total_results
+    activeQuery.value = term
+  } catch (err) {
+    if (id !== requestId) return
+    error.value = timedOut ? 'Request timed out. Check your connection and retry.'
+      : err.name === 'AbortError' ? ''
+      : err.status !== undefined ? err.message
+      : 'Could not reach TMDB. Check your connection or try again later.'
   } finally {
-    loading.value = false
+    clearTimeout(timer)
+    if (id === requestId) loading.value = false
   }
 }
+function connect() {
+  const key = draftKey.value.trim()
+  if (!key) return
+  apiKey.value = key
+  draftKey.value = ''
+  activeQuery.value = ''
+  query.value = ''
+  loadMovies(1, '')
+}
+function search() { loadMovies(1, query.value.trim()) }
+function popular() { query.value = ''; loadMovies(1, '') }
+function disconnect() {
+  requestId++
+  controller?.abort()
+  apiKey.value = ''; draftKey.value = ''; query.value = ''; activeQuery.value = ''
+  movies.value = []; error.value = ''; loading.value = false
+  page.value = 1; totalPages.value = 0; totalResults.value = 0
+}
+onBeforeUnmount(() => { requestId++; controller?.abort() })
 </script>
 
 <template>
-  <main class="wrap">
-    <header>
-      <h1>🎬 TMDB 인기 영화</h1>
-      <p class="sub">Vue + TMDB API · 202513715 서종호</p>
-      <form class="connect" @submit.prevent="connect">
-        <input v-model="apiKey" type="password" placeholder="TMDB API Key" autocomplete="off" />
-        <button :disabled="loading">Connect</button>
+  <header class="site-header">
+    <a class="brand" href="#top">MOVIE<span>LAB</span></a>
+    <nav aria-label="Main navigation"><a href="#movies">Movies</a><a href="#about">About & credits</a></nav>
+    <span class="lab-label">VUE + TMDB API / WEEK 04</span>
+  </header>
+  <main id="top">
+    <section class="hero" aria-labelledby="hero-title">
+      <p class="eyebrow">LIVE MOVIE DATA FROM TMDB</p>
+      <h1 id="hero-title">Your next story<br>starts here.</h1>
+      <p>Browse popular movies and search the TMDB catalog.</p>
+      <form v-if="!apiKey" class="key-form" @submit.prevent="connect">
+        <label for="tmdb-key">TMDB API Key (v3)</label>
+        <div class="search-field"><input id="tmdb-key" v-model="draftKey" type="password"
+          placeholder="Paste your own API Key (v3)" autocomplete="off" spellcheck="false" required>
+          <button type="submit" :disabled="!draftKey.trim()">Connect</button></div>
+        <p class="key-help">Used only in this tab’s memory. Reloading clears it.
+          <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">Get your key</a></p>
       </form>
-      <p class="status">{{ status }}</p>
-    </header>
-
-    <section class="grid">
-      <article v-for="m in movies" :key="m.id" class="card">
-        <img v-if="m.poster_path" :src="`https://image.tmdb.org/t/p/w342${m.poster_path}`" :alt="m.title" loading="lazy" />
-        <div class="info">
-          <h2>{{ m.title }}</h2>
-          <p class="meta">⭐ {{ m.vote_average?.toFixed(1) }} · {{ m.release_date }}</p>
-          <p class="overview">{{ m.overview || '줄거리 정보가 없습니다.' }}</p>
-        </div>
-      </article>
+      <template v-else>
+        <form class="search-form" role="search" @submit.prevent="search">
+          <label for="movie-query">Search movie titles</label>
+          <div class="search-field"><input id="movie-query" v-model="query" type="search"
+            placeholder="Try a movie title…" autocomplete="off"><button :disabled="loading" type="submit">Search</button></div>
+        </form>
+        <div class="connection-actions"><button type="button" :disabled="loading" @click="popular">Popular movies</button>
+          <button type="button" @click="disconnect">Clear / change key</button></div>
+      </template>
+    </section>
+    <section id="movies" class="catalog" aria-labelledby="catalog-title" :aria-busy="loading">
+      <div class="section-heading"><div><p class="eyebrow">THE MOVIE DATABASE</p>
+        <h2 id="catalog-title">{{ activeQuery ? `Results for “${activeQuery}”` : 'Popular movies' }}</h2></div></div>
+      <div v-if="!apiKey" class="empty-state"><h3>Connect to TMDB</h3><p>Enter your API Key (v3) above to load real movies.</p></div>
+      <p v-else-if="loading" class="status-box" role="status">Loading movies from TMDB…</p>
+      <div v-else-if="error" class="status-box error" role="alert"><h3>Could not load movies</h3><p>{{ error }}</p>
+        <button @click="search">Retry current search</button></div>
+      <template v-else>
+        <p class="result-count" role="status">{{ totalResults }} results · page {{ page }} · {{ movies.length }} shown</p>
+        <div v-if="movies.length" class="movie-grid"><MovieCard v-for="movie in movies" :key="movie.id" :movie="movie" /></div>
+        <div v-else class="empty-state"><h3>No movies found</h3><p>Try another title or browse popular movies.</p><button @click="popular">Show popular movies</button></div>
+        <nav v-if="totalPages > 1" class="pagination" aria-label="Result pages">
+          <button :disabled="page <= 1" @click="loadMovies(page - 1)">Previous</button>
+          <span>Page {{ page }} of {{ totalPages }}</span>
+          <button :disabled="page >= totalPages" @click="loadMovies(page + 1)">Next</button>
+        </nav>
+      </template>
     </section>
   </main>
+  <footer id="about" class="site-footer">
+    <strong>MOVIE LAB / ABOUT & CREDITS</strong>
+    <a class="tmdb-credit" href="https://www.themoviedb.org/" target="_blank" rel="noopener"><img :src="tmdbLogo" alt="TMDB" width="110"></a>
+    <p>This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
+    <p>A classroom project. Each visitor supplies their own API Key (v3), kept in memory and sent only to TMDB for API requests. Movie data and posters need internet access.</p>
+  </footer>
 </template>
-
-<style>
-* { box-sizing: border-box; }
-body { margin: 0; background: #0f1419; color: #e8eaed; font-family: system-ui, -apple-system, 'Apple SD Gothic Neo', sans-serif; }
-.wrap { max-width: 1100px; margin: 0 auto; padding: 32px 20px; }
-h1 { margin: 0; font-size: 28px; }
-.sub { color: #9aa0a6; margin: 6px 0 20px; }
-.connect { display: flex; gap: 8px; }
-.connect input { flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid #3c4043; background: #1a1f24; color: inherit; }
-.connect button { padding: 10px 18px; border: 0; border-radius: 8px; background: #01b4e4; color: #0f1419; font-weight: 700; cursor: pointer; }
-.connect button:disabled { opacity: .5; }
-.status { color: #9aa0a6; font-size: 14px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; margin-top: 16px; }
-.card { background: #1a1f24; border-radius: 10px; overflow: hidden; }
-.card img { width: 100%; display: block; aspect-ratio: 2/3; object-fit: cover; }
-.info { padding: 10px 12px 14px; }
-.info h2 { font-size: 16px; margin: 0 0 4px; }
-.meta { color: #9aa0a6; font-size: 13px; margin: 0 0 6px; }
-.overview { font-size: 13px; line-height: 1.5; margin: 0; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-</style>
